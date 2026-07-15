@@ -15,11 +15,15 @@
  *
  * build: make        run: python3 run.py --delay_ms 60
  */
+
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <stdint.h>
+
+#define PAYLOAD_SIZE 160
 
 int main(void) {
     int in_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -27,10 +31,7 @@ int main(void) {
     in_addr.sin_family = AF_INET;
     in_addr.sin_port = htons(47010);
     in_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    if (bind(in_fd, (struct sockaddr *)&in_addr, sizeof in_addr) < 0) {
-        perror("bind 47010");
-        return 1;
-    }
+    if (bind(in_fd, (struct sockaddr *)&in_addr, sizeof in_addr) < 0) return 1;
 
     int out_fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in relay = {0};
@@ -39,12 +40,32 @@ int main(void) {
     relay.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     unsigned char buf[2048];
+    uint8_t saved_even_payload[PAYLOAD_SIZE];
+    
     for (;;) {
         ssize_t n = recvfrom(in_fd, buf, sizeof buf, 0, NULL, NULL);
-        if (n <= 0) continue;
-        /* your protocol design goes here; baseline = send once, as-is */
-        sendto(out_fd, buf, (size_t)n, 0, (struct sockaddr *)&relay,
-               sizeof relay);
+        if (n != 4 + PAYLOAD_SIZE) continue; 
+        
+        uint32_t net_seq;
+        memcpy(&net_seq, buf, 4);
+        uint32_t host_seq = ntohl(net_seq);
+
+        sendto(out_fd, buf, n, 0, (struct sockaddr *)&relay, sizeof relay);
+       
+        if (host_seq % 2 == 0) {
+            memcpy(saved_even_payload, buf + 4, PAYLOAD_SIZE);
+        } else {
+            unsigned char fec_buf[4 + PAYLOAD_SIZE];
+            
+            uint32_t fec_seq = htonl((host_seq - 1) | 0x80000000); 
+            memcpy(fec_buf, &fec_seq, 4);
+            
+            for (int i = 0; i < PAYLOAD_SIZE; i++) {
+                fec_buf[4 + i] = saved_even_payload[i] ^ buf[4 + i];
+            }
+            
+            sendto(out_fd, fec_buf, sizeof(fec_buf), 0, (struct sockaddr *)&relay, sizeof relay);
+        }
     }
     return 0;
 }
